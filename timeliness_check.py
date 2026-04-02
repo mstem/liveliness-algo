@@ -66,11 +66,6 @@ F_BLOG_2      = "fldsO2OQvw1mxqc6l"  # Blog feed (second field)
 F_NEW_LAUNCH  = "fldDItqXavISnFFTy"  # New launch? (multilineText, "x" = new this year)
 F_LAUNCH_DATE = "fldOymIEO9nuUItWv"  # Requested launch date
 F_LINKS       = "flduR7cgq36S9SM4H"  # Linked records in Links table
-F_TWITTER     = "fldWUXh5Aijg3SmWa"  # Twitter URL
-F_FACEBOOK    = "fldxj5ooznnY4R4gT"  # Facebook URL
-F_INSTAGRAM   = "fldJc9Uk2qWXBx1YM"  # Instagram URL
-F_YOUTUBE     = "fldj6rPd7vunwBL60"  # YouTube Channel
-F_LINKEDIN    = "fldH1fHTOywh509kj"  # LinkedIn URL
 
 # Output fields (created 2026-04-01)
 F_ACTIVITY_STATUS = "fld8cGHyyU0CffP2s"  # Activity status (singleSelect)
@@ -122,7 +117,6 @@ def at_patch(table, records):
 SOURCE_FIELDS = [
     F_NAME, F_WEBSITE, F_GITHUB, F_BLOG_1, F_BLOG_2,
     F_NEW_LAUNCH, F_LAUNCH_DATE, F_LINKS,
-    F_TWITTER, F_FACEBOOK, F_INSTAGRAM, F_YOUTUBE, F_LINKEDIN,
     F_LAST_CHECK,
 ]
 
@@ -148,7 +142,6 @@ def fetch_batch():
 
     # Pass 1: never checked
     data = at_get(LISTINGS_TABLE, {
-        "fields[]": SOURCE_FIELDS,
         "filterByFormula": f'{{{_field_name(F_LAST_CHECK)}}} = ""',
         "pageSize": BATCH_SIZE * 4,
     })
@@ -157,7 +150,6 @@ def fetch_batch():
     # Pass 2: oldest checked (if we still need records)
     if len(collected) < BATCH_SIZE * 2:
         data2 = at_get(LISTINGS_TABLE, {
-            "fields[]": SOURCE_FIELDS,
             "filterByFormula": f'{{{_field_name(F_LAST_CHECK)}}} != ""',
             f"sort[0][field]": F_LAST_CHECK,
             f"sort[0][direction]": "asc",
@@ -684,23 +676,11 @@ def compute_liveliness(rec):
             blog_date = d
     print(f"    blog     → latest post: {blog_date}")
 
-    # ── Social links: recency + accessibility ────────────────────────────────
-    # Collect all social URLs (direct fields + Links table)
-    direct_social_urls = list(filter(None, [
-        fields.get(F_TWITTER),
-        fields.get(F_LINKEDIN),
-        fields.get(F_FACEBOOK),
-        fields.get(F_INSTAGRAM),
-        fields.get(F_YOUTUBE),
-    ]))
-
+    # ── Social links: recency + accessibility (from Links table only) ───────────
     linked_ids = [r.get("id") for r in (fields.get(F_LINKS) or [])]
     link_items = fetch_links_for_record(linked_ids) if linked_ids else []
-    linked_urls = [item["url"] for item in link_items]
-
-    all_social_urls = direct_social_urls + linked_urls
-    if linked_urls:
-        print(f"    links    → {len(link_items)} records fetched")
+    all_social_urls = [item["url"] for item in link_items]
+    print(f"    links    → {len(link_items)} records fetched")
 
     accessible_count  = 0
     social_dated      = []  # list of (datetime, platform_label)
@@ -775,7 +755,6 @@ def compute_liveliness(rec):
 def fetch_by_ids(record_ids):
     """Fetch specific records by ID (for targeted test runs)."""
     data = at_get(LISTINGS_TABLE, {
-        "fields[]": SOURCE_FIELDS,
         "recordIds[]": record_ids,
     })
     return data.get("records", [])
