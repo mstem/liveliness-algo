@@ -28,6 +28,6 @@ jobs:
       - name: Run timeliness check
         env:
           AIRTABLE_PAT:    ${{ secrets.AIRTABLE_PAT }}
-          GITHUB_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN:    ${{ secrets.GH_TOKEN }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: python timeliness_check.py
