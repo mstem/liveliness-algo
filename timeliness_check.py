@@ -89,13 +89,15 @@ AT_HEADERS = {
 
 
 def at_get(table, params):
+    params = {**params, "returnFieldsByFieldId": "true"}
     r = requests.get(f"{AT_BASE}/{table}", headers=AT_HEADERS, params=params, timeout=15)
     r.raise_for_status()
     return r.json()
 
 
 def at_get_record(table, record_id):
-    r = requests.get(f"{AT_BASE}/{table}/{record_id}", headers=AT_HEADERS, timeout=10)
+    r = requests.get(f"{AT_BASE}/{table}/{record_id}", headers=AT_HEADERS,
+                     params={"returnFieldsByFieldId": "true"}, timeout=10)
     if r.status_code == 200:
         return r.json()
     return None
