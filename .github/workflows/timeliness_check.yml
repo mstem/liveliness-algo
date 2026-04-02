@@ -1,0 +1,33 @@
+name: Timeliness Check
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'  # every 10 minutes
+  workflow_dispatch:         # also allows manual trigger from GitHub UI
+
+concurrency:
+  group: timeliness-check
+  cancel-in-progress: false  # wait for current run to finish, don't overlap
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8       # kill if a run stalls (shouldn't exceed ~5 min for 10 projects)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run timeliness check
+        env:
+          AIRTABLE_PAT:    ${{ secrets.AIRTABLE_PAT }}
+          GITHUB_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: python timeliness_check.py
