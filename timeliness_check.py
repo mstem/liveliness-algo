@@ -655,7 +655,7 @@ def compute_liveliness(rec):
     discovered_url = None
 
     if url_class == "skip":
-        print(f"    website  → skipped placeholder URL ({raw_url[:60]})")
+        print(f"    website  → no usable URL ({(raw_url or 'none')[:60]})")
         website_alive, is_archived = None, False
     elif url_class == "article":
         print(f"    website  → article URL detected, searching for homepage…")
