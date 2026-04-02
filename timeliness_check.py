@@ -814,13 +814,14 @@ def main():
         }
         if result["last_activity_date"]:
             update["fields"][F_LAST_ACTIVITY] = result["last_activity_date"]
-        update["discovered_url"] = result.get("discovered_url")
+        update["_discovered_url"] = result.get("discovered_url")  # stored locally, not sent to Airtable
         updates.append(update)
         time.sleep(0.5)
 
     print(f"\nWriting {len(updates)} results to Airtable...")
     for i in range(0, len(updates), 10):
-        chunk = updates[i : i + 10]
+        # Strip local-only keys before sending to Airtable
+        chunk = [{"id": u["id"], "fields": u["fields"]} for u in updates[i : i + 10]]
         at_patch(LISTINGS_TABLE, chunk)
         print(f"  Updated records {i+1}–{i+len(chunk)}")
         time.sleep(0.2)
@@ -830,7 +831,7 @@ def main():
     print("-" * 90)
     for u in updates:
         f   = u["fields"]
-        disc = u.get("discovered_url") or ""
+        disc = u.get("_discovered_url") or ""
         print(
             f"{u['id']:<20} "
             f"{str(f[F_LIVELINESS]):>7}  "
