@@ -679,7 +679,7 @@ def compute_liveliness(rec):
     print(f"    blog     → latest post: {blog_date}")
 
     # ── Social links: recency + accessibility (from Links table only) ───────────
-    linked_ids = [r.get("id") for r in (fields.get(F_LINKS) or [])]
+    linked_ids = [r if isinstance(r, str) else r.get("id") for r in (fields.get(F_LINKS) or [])]
     link_items = fetch_links_for_record(linked_ids) if linked_ids else []
     all_social_urls = [item["url"] for item in link_items]
     print(f"    links    → {len(link_items)} records fetched")
