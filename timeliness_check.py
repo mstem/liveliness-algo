@@ -67,11 +67,11 @@ F_NEW_LAUNCH  = "fldDItqXavISnFFTy"  # New launch? (multilineText, "x" = new thi
 F_LAUNCH_DATE = "fldOymIEO9nuUItWv"  # Requested launch date
 F_LINKS       = "flduR7cgq36S9SM4H"  # Linked records in Links table
 
-# Output fields (created 2026-04-01)
-F_ACTIVITY_STATUS = "fld8cGHyyU0CffP2s"  # Activity status (singleSelect)
-F_LIVELINESS      = "fldbzhgtmZEjH7yaK"  # Liveliness score (number)
-F_LAST_ACTIVITY   = "fldeRTiBRsmhQJhxx"  # Last activity date
-F_LAST_CHECK      = "fld8pjefvIqtFYxxO"  # Last timeliness check
+# Output fields
+F_STATUS      = "fldw9vTztFwBOrcue"   # Status (existing singleSelect: Active / Inactive / N/A)
+F_LIVELINESS  = "fldbzhgtmZEjH7yaK"   # Liveliness score (number, created 2026-04-01)
+F_LAST_ACTIVITY = "fldeRTiBRsmhQJhxx" # Last activity date (created 2026-04-01)
+F_LAST_CHECK  = "fld8pjefvIqtFYxxO"   # Last timeliness check (created 2026-04-01)
 
 # ── Airtable field IDs — Links table ─────────────────────────────────────────
 
@@ -309,28 +309,59 @@ def find_homepage_in_article(article_url):
 
 # ── Individual signal checks ──────────────────────────────────────────────────
 
+def _extract_archive_original(url):
+    """
+    Extract the original URL from a web.archive.org link.
+    e.g. https://web.archive.org/web/20180217125651/http://thesponge.eu/
+    returns http://thesponge.eu/
+    """
+    m = re.search(r'web\.archive\.org/web/\d+[^/]*/(.+)', url)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _try_fetch(url):
+    """Attempt a GET and return (is_alive, exception_type)."""
+    try:
+        r = SESSION.get(url, timeout=10, allow_redirects=True, stream=True)
+        r.close()
+        return (200 <= r.status_code < 400), None
+    except requests.exceptions.SSLError:
+        return True, None   # broken SSL but site exists
+    except requests.exceptions.Timeout:
+        return None, "timeout"
+    except requests.exceptions.TooManyRedirects:
+        return None, "redirects"
+    except Exception:
+        return False, "error"
+
+
 def check_website(url):
     """
     Returns (is_alive: bool | None, is_archived: bool).
+    For web archive URLs, tries the original URL first; only treats as
+    archived/dead if the original URL also fails.
     None means we couldn't determine (timeout / network error).
     """
     if not url:
         return None, False
 
-    is_archived = "web.archive.org" in url or "waybackmachine.org" in url
+    is_archive_url = "web.archive.org" in url or "waybackmachine.org" in url
 
-    try:
-        r = SESSION.get(url, timeout=10, allow_redirects=True, stream=True)
-        r.close()
-        return (200 <= r.status_code < 400), is_archived
-    except requests.exceptions.SSLError:
-        return True, is_archived       # broken SSL, site still exists
-    except requests.exceptions.Timeout:
-        return None, is_archived
-    except requests.exceptions.TooManyRedirects:
-        return None, is_archived
-    except Exception:
-        return False, is_archived
+    if is_archive_url:
+        original = _extract_archive_original(url)
+        if original:
+            print(f"    website  → archive URL, trying original: {original[:60]}")
+            alive, _ = _try_fetch(original)
+            if alive is True:
+                return True, False   # original site is live — not archived
+            if alive is None:
+                return None, True    # couldn't determine
+        # Original is down or couldn't be extracted — genuinely archived
+        return False, True
+
+    return _try_fetch(url)[0], False
 
 
 def check_github(url):
@@ -623,9 +654,7 @@ def social_recency_score(dt, now):
 
 
 def score_to_status(score):
-    if score >= 70: return "Active"
-    if score >= 45: return "Likely Active"
-    if score >= 20: return "Possibly Inactive"
+    if score >= 45: return "Active"
     return "Inactive"
 
 
@@ -737,7 +766,7 @@ def compute_liveliness(rec):
     no_signals = (best_date is None and website_alive is None and accessible_count == 0)
 
     score  = round(score, 1)
-    status = "Unknown" if no_signals else score_to_status(score)
+    status = None if no_signals else score_to_status(score)
 
     last_activity_str = best_date.strftime("%Y-%m-%d") if best_date else None
     print(f"    → score={score}  status={status}  last_activity={last_activity_str}")
@@ -788,11 +817,12 @@ def main():
         update = {
             "id": rec["id"],
             "fields": {
-                F_LIVELINESS:      result["score"],
-                F_ACTIVITY_STATUS: result["status"],
-                F_LAST_CHECK:      today,
+                F_LIVELINESS: result["score"],
+                F_LAST_CHECK: today,
             },
         }
+        if result["status"]:
+            update["fields"][F_STATUS] = result["status"]
         if result["last_activity_date"]:
             update["fields"][F_LAST_ACTIVITY] = result["last_activity_date"]
         update["_discovered_url"] = result.get("discovered_url")  # stored locally, not sent to Airtable
@@ -816,7 +846,7 @@ def main():
         print(
             f"{u['id']:<20} "
             f"{str(f[F_LIVELINESS]):>7}  "
-            f"{f[F_ACTIVITY_STATUS]:<20}  "
+            f"{f[F_STATUS]:<20}  "
             f"{f.get(F_LAST_ACTIVITY, 'n/a'):<14}  "
             f"{disc}"
         )
