@@ -2,7 +2,7 @@ name: Timeliness Check
 
 on:
   schedule:
-    - cron: '*/10 * * * *'  # every 10 minutes
+    - cron: '0 9 * * *'  # every day at 09:00 UTC
   workflow_dispatch:         # also allows manual trigger from GitHub UI
 
 concurrency:
@@ -12,7 +12,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 8       # kill if a run stalls (shouldn't exceed ~5 min for 10 projects)
+    timeout-minutes: 15      # kill if a run stalls (shouldn't exceed ~10 min for 20 projects)
 
     steps:
       - uses: actions/checkout@v4

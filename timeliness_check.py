@@ -54,7 +54,7 @@ YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 BASE_ID       = "appYHxsLYleU2RVYk"
 LISTINGS_TABLE = "tblELFP9tGX07UZDo"
 LINKS_TABLE    = "tblpRr3lPFncgTS8y"
-BATCH_SIZE     = 10
+BATCH_SIZE     = 20
 
 # ── Airtable field IDs — Listings ─────────────────────────────────────────────
 
