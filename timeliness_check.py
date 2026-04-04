@@ -66,12 +66,19 @@ F_BLOG_2      = "fldsO2OQvw1mxqc6l"  # Blog feed (second field)
 F_NEW_LAUNCH  = "fldDItqXavISnFFTy"  # New launch? (multilineText, "x" = new this year)
 F_LAUNCH_DATE = "fldOymIEO9nuUItWv"  # Requested launch date
 F_LINKS       = "flduR7cgq36S9SM4H"  # Linked records in Links table
+F_TYPE        = "fld85Qsj7sU56liv9"  # Type (multipleSelects)
+F_FORMATS     = "fldSJjJ4rbDBS8849"  # Formats (multipleRecordLinks → Format table)
+F_CATEGORIES  = "fldXGB674po9h9xtB"  # Categories (multipleRecordLinks)
+
+FORMAT_TABLE  = "tblDRByL15hmKr0sJ"
+FORMAT_F_NAME = "fldSJg1rpaHBme1FE"
 
 # Output fields
-F_STATUS      = "fldw9vTztFwBOrcue"   # Status (existing singleSelect: Active / Inactive / N/A)
-F_LIVELINESS  = "fldbzhgtmZEjH7yaK"   # Liveliness score (number, created 2026-04-01)
-F_LAST_ACTIVITY = "fldeRTiBRsmhQJhxx" # Last activity date (created 2026-04-01)
-F_LAST_CHECK  = "fld8pjefvIqtFYxxO"   # Last timeliness check (created 2026-04-01)
+F_STATUS          = "fldw9vTztFwBOrcue"  # Status — existing field (Active / Inactive / N/A)
+F_ACTIVITY_STATUS = "fld8cGHyyU0CffP2s"  # Activity status — full scale (created 2026-04-01)
+F_LIVELINESS      = "fldbzhgtmZEjH7yaK"  # Liveliness score (created 2026-04-01)
+F_LAST_ACTIVITY   = "fldeRTiBRsmhQJhxx"  # Last activity date (created 2026-04-01)
+F_LAST_CHECK      = "fld8pjefvIqtFYxxO"  # Last timeliness check (created 2026-04-01)
 
 # ── Airtable field IDs — Links table ─────────────────────────────────────────
 
@@ -119,18 +126,63 @@ def at_patch(table, records):
 SOURCE_FIELDS = [
     F_NAME, F_WEBSITE, F_GITHUB, F_BLOG_1, F_BLOG_2,
     F_NEW_LAUNCH, F_LAUNCH_DATE, F_LINKS,
+    F_TYPE, F_FORMATS, F_CATEGORIES,
     F_LAST_CHECK,
 ]
 
 CURRENT_YEAR = str(datetime.now().year)
 
+_format_name_cache = None  # {record_id: name}
 
-def is_new_launch_this_year(rec):
-    """Exclude projects launched this year that are marked with 'x' in New launch?"""
+
+def get_format_names():
+    """Fetch Format table once per run and return a {record_id: name} map."""
+    global _format_name_cache
+    if _format_name_cache is not None:
+        return _format_name_cache
+    try:
+        data = at_get(FORMAT_TABLE, {"pageSize": 200})
+        _format_name_cache = {
+            rec["id"]: (rec.get("fields", {}).get(FORMAT_F_NAME) or "").strip().lower()
+            for rec in data.get("records", [])
+        }
+    except Exception as e:
+        print(f"  Warning: could not fetch Format table: {e}", file=sys.stderr)
+        _format_name_cache = {}
+    return _format_name_cache
+
+
+def is_excluded(rec):
+    """
+    Returns True if the record should be skipped:
+    - New launch this year (marked 'x')
+    - Type contains 'document'
+    - Formats contains 'books'
+    """
     f = rec.get("fields", {})
+
+    # New launch this year
     new_launch  = (f.get(F_NEW_LAUNCH) or "").strip().lower()
     launch_date = (f.get(F_LAUNCH_DATE) or "")
-    return new_launch == "x" and str(launch_date).startswith(CURRENT_YEAR)
+    if new_launch == "x" and str(launch_date).startswith(CURRENT_YEAR):
+        return True
+
+    # Type = document
+    type_values = f.get(F_TYPE) or []
+    if any("document" in str(t).lower() for t in type_values):
+        return True
+
+    # Format = books
+    format_ids    = f.get(F_FORMATS) or []
+    format_names  = get_format_names()
+    if any(format_names.get(fid, "") == "books" for fid in format_ids):
+        return True
+
+    # No categories assigned
+    if not f.get(F_CATEGORIES):
+        return True
+
+    return False
 
 
 def fetch_batch():
@@ -159,7 +211,7 @@ def fetch_batch():
         })
         collected.extend(data2.get("records", []))
 
-    eligible = [r for r in collected if not is_new_launch_this_year(r)]
+    eligible = [r for r in collected if not is_excluded(r)]
     return eligible[:BATCH_SIZE]
 
 
@@ -193,15 +245,31 @@ _ARTICLE_DOMAINS = {
 }
 
 # Domains and patterns we should skip entirely (no useful signal)
-_SKIP_DOMAINS = {"duckduckgo.com", "bing.com", "google.com"}
+_SKIP_DOMAINS = {"bing.com", "google.com"}
+
+
+def resolve_duckduckgo(url):
+    """
+    Follow a DuckDuckGo !ducky (I'm Feeling Ducky) URL to its final destination.
+    Returns the resolved URL, or None if resolution failed or stayed on DuckDuckGo.
+    """
+    try:
+        r = SESSION.get(url, timeout=10, allow_redirects=True)
+        final = r.url
+        if "duckduckgo.com" not in final:
+            return final
+    except Exception:
+        pass
+    return None
 
 
 def classify_url(url):
     """
     Returns one of: "skip", "article", "homepage".
     "skip"     → placeholder / search engine URL, ignore completely.
-    "article"  → known media domain or article-path pattern; try to find real URL.
+    "article"  → known media domain; try to find real URL.
     "homepage" → treat as the project's actual website.
+    Note: DuckDuckGo URLs are resolved before this is called.
     """
     if not url:
         return "skip"
@@ -653,9 +721,22 @@ def social_recency_score(dt, now):
     return 0  # beyond 1 year: no social score
 
 
-def score_to_status(score):
-    if score >= 45: return "Active"
+def score_to_activity_status(score):
+    """Full 5-value scale for the Activity status field."""
+    if score >= 70: return "Active"
+    if score >= 45: return "Likely Active"
+    if score >= 20: return "Possibly Inactive"
     return "Inactive"
+
+
+def score_to_status(score):
+    """
+    Definitive write to the existing Status field.
+    Only returns a value when confidence is high; None = don't touch Status.
+    """
+    if score >= 70: return "Active"
+    if score < 20:  return "Inactive"
+    return None
 
 
 # ── Main computation ──────────────────────────────────────────────────────────
@@ -672,7 +753,15 @@ def compute_liveliness(rec):
     print(f"\n  [{name}]")
 
     # ── Website ──────────────────────────────────────────────────────────────
-    raw_url    = fields.get(F_WEBSITE)
+    raw_url = fields.get(F_WEBSITE)
+    if raw_url and "duckduckgo.com" in raw_url and "!ducky" in raw_url:
+        resolved = resolve_duckduckgo(raw_url)
+        if resolved:
+            print(f"    website  → resolved DDG URL to: {resolved[:70]}")
+            raw_url = resolved
+        else:
+            print(f"    website  → DDG URL could not be resolved, skipping")
+            raw_url = None
     url_class  = classify_url(raw_url)
     website_url = raw_url
     discovered_url = None
@@ -766,16 +855,18 @@ def compute_liveliness(rec):
     no_signals = (best_date is None and website_alive is None and accessible_count == 0)
 
     score  = round(score, 1)
-    status = None if no_signals else score_to_status(score)
+    activity_status = "Unknown" if no_signals else score_to_activity_status(score)
+    status          = None      if no_signals else score_to_status(score)
 
     last_activity_str = best_date.strftime("%Y-%m-%d") if best_date else None
-    print(f"    → score={score}  status={status}  last_activity={last_activity_str}")
+    print(f"    → score={score}  activity={activity_status}  status={status or '(no change)'}  last_activity={last_activity_str}")
     if discovered_url:
         print(f"    → discovered homepage: {discovered_url}  (original was article URL)")
 
     return {
         "score":              score,
         "last_activity_date": last_activity_str,
+        "activity_status":    activity_status,
         "status":             status,
         "discovered_url":     discovered_url,
     }
@@ -817,11 +908,12 @@ def main():
         update = {
             "id": rec["id"],
             "fields": {
-                F_LIVELINESS: result["score"],
-                F_LAST_CHECK: today,
+                F_LIVELINESS:      result["score"],
+                F_ACTIVITY_STATUS: result["activity_status"],
+                F_LAST_CHECK:      today,
             },
         }
-        if result["status"]:
+        if result["status"]:                    # only when score is definitively high or low
             update["fields"][F_STATUS] = result["status"]
         if result["last_activity_date"]:
             update["fields"][F_LAST_ACTIVITY] = result["last_activity_date"]
@@ -838,17 +930,18 @@ def main():
         time.sleep(0.2)
 
     print("\n✓ Done.\n")
-    print(f"{'Record ID':<20} {'Score':>7}  {'Status':<20}  Last activity  Discovered URL")
-    print("-" * 90)
+    print(f"{'Record ID':<20} {'Score':>7}  {'Activity status':<20}  {'Status':<10}  Last activity")
+    print("-" * 80)
     for u in updates:
-        f   = u["fields"]
+        f    = u["fields"]
         disc = u.get("_discovered_url") or ""
         print(
             f"{u['id']:<20} "
             f"{str(f[F_LIVELINESS]):>7}  "
-            f"{f[F_STATUS]:<20}  "
-            f"{f.get(F_LAST_ACTIVITY, 'n/a'):<14}  "
-            f"{disc}"
+            f"{f.get(F_ACTIVITY_STATUS, ''):< 20}  "
+            f"{f.get(F_STATUS, '(no change)'):<10}  "
+            f"{f.get(F_LAST_ACTIVITY, 'n/a')}"
+            + (f"  → {disc}" if disc else "")
         )
 
 
