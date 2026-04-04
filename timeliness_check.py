@@ -394,6 +394,9 @@ def _try_fetch(url):
     try:
         r = SESSION.get(url, timeout=10, allow_redirects=True, stream=True)
         r.close()
+        # Bot-blocking responses are indeterminate — don't treat as dead
+        if r.status_code in (403, 429):
+            return None, "blocked"
         return (200 <= r.status_code < 400), None
     except requests.exceptions.SSLError:
         return True, None   # broken SSL but site exists
@@ -498,6 +501,48 @@ def check_url_alive(url):
         return None
 
 
+def discover_feed_url(website_url):
+    """
+    Try to find an RSS/Atom feed URL for a site when none is explicitly stored.
+    1. Fetch homepage and look for <link rel="alternate" type="application/rss+xml|atom+xml">
+    2. Try common feed paths (/feed, /rss, /feed.xml, etc.)
+    Returns a feed URL string or None.
+    """
+    if not website_url:
+        return None
+    parsed = urlparse(website_url)
+    base   = f"{parsed.scheme}://{parsed.netloc}"
+
+    # Step 1: autodiscovery link tag in homepage HTML
+    try:
+        r = SESSION.get(website_url, timeout=10)
+        if r.status_code == 200:
+            # Match <link ... type="application/rss+xml" ... href="..."> in either attribute order
+            for pattern in (
+                re.compile(r'<link[^>]+type=["\']application/(?:rss|atom)\+xml["\'][^>]+href=["\']([^"\']+)["\']', re.I),
+                re.compile(r'<link[^>]+href=["\']([^"\']+)["\'][^>]+type=["\']application/(?:rss|atom)\+xml["\']', re.I),
+            ):
+                m = pattern.search(r.text)
+                if m:
+                    href = m.group(1)
+                    return href if href.startswith("http") else base + (href if href.startswith("/") else "/" + href)
+    except Exception:
+        pass
+
+    # Step 2: try common feed paths
+    for path in ("/feed", "/rss", "/feed.xml", "/atom.xml", "/rss.xml", "/blog/feed"):
+        try:
+            url = base + path
+            r   = SESSION.get(url, timeout=8, allow_redirects=True)
+            ct  = r.headers.get("content-type", "")
+            if r.status_code == 200 and any(s in ct for s in ("xml", "rss", "atom")):
+                return url
+        except Exception:
+            continue
+
+    return None
+
+
 def fetch_links_for_record(linked_ids):
     """
     Fetch URL and type from the Links table for the given linked record IDs.
@@ -540,6 +585,13 @@ def _parse_feed_latest(url, extra_headers=None):
                     dt = datetime(*t[:6], tzinfo=timezone.utc)
                     if latest is None or dt > latest:
                         latest = dt
+        # Fall back to channel-level date (lastBuildDate / updated) if no entry dates
+        if latest is None:
+            for attr in ("updated_parsed", "published_parsed"):
+                t = getattr(feed.feed, attr, None)
+                if t:
+                    latest = datetime(*t[:6], tzinfo=timezone.utc)
+                    break
         return latest
     except Exception:
         return None
@@ -790,7 +842,13 @@ def compute_liveliness(rec):
 
     # ── Blog feeds ───────────────────────────────────────────────────────────
     blog_date = None
-    for feed_url in filter(None, [fields.get(F_BLOG_1), fields.get(F_BLOG_2)]):
+    explicit_feeds = list(filter(None, [fields.get(F_BLOG_1), fields.get(F_BLOG_2)]))
+    if not explicit_feeds and website_url and url_class == "homepage":
+        auto_feed = discover_feed_url(website_url)
+        if auto_feed:
+            print(f"    blog     → auto-discovered feed: {auto_feed}")
+            explicit_feeds = [auto_feed]
+    for feed_url in explicit_feeds:
         d = check_blog_feed(feed_url)
         if d and (blog_date is None or d > blog_date):
             blog_date = d
