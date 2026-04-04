@@ -141,7 +141,7 @@ def get_format_names():
     if _format_name_cache is not None:
         return _format_name_cache
     try:
-        data = at_get(FORMAT_TABLE, {"pageSize": 200})
+        data = at_get(FORMAT_TABLE, {"pageSize": 100})
         _format_name_cache = {
             rec["id"]: (rec.get("fields", {}).get(FORMAT_F_NAME) or "").strip().lower()
             for rec in data.get("records", [])
@@ -938,7 +938,7 @@ def main():
         print(
             f"{u['id']:<20} "
             f"{str(f[F_LIVELINESS]):>7}  "
-            f"{f.get(F_ACTIVITY_STATUS, ''):< 20}  "
+            f"{f.get(F_ACTIVITY_STATUS, ''):<20}  "
             f"{f.get(F_STATUS, '(no change)'):<10}  "
             f"{f.get(F_LAST_ACTIVITY, 'n/a')}"
             + (f"  → {disc}" if disc else "")
