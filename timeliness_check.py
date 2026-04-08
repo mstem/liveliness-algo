@@ -70,8 +70,11 @@ F_TYPE        = "fld85Qsj7sU56liv9"  # Type (multipleSelects)
 F_FORMATS     = "fldSJjJ4rbDBS8849"  # Formats (multipleRecordLinks → Format table)
 F_CATEGORIES  = "fldXGB674po9h9xtB"  # Categories (multipleRecordLinks)
 
-FORMAT_TABLE  = "tblDRByL15hmKr0sJ"
-FORMAT_F_NAME = "fldSJg1rpaHBme1FE"
+FORMAT_TABLE      = "tblDRByL15hmKr0sJ"
+FORMAT_F_NAME     = "fldSJg1rpaHBme1FE"
+
+CATEGORIES_TABLE  = "tblxtu4Bm8QCcuuek"
+CATEGORY_F_SLUG   = "fldhK3tIIHmy0gq5B"  # Slug (singleLineText)
 
 # Output fields
 F_STATUS          = "fldw9vTztFwBOrcue"  # Status — existing field (Active / Inactive / N/A)
@@ -127,7 +130,7 @@ SOURCE_FIELDS = [
     F_NAME, F_WEBSITE, F_GITHUB, F_BLOG_1, F_BLOG_2,
     F_NEW_LAUNCH, F_LAUNCH_DATE, F_LINKS,
     F_TYPE, F_FORMATS, F_CATEGORIES,
-    F_LAST_CHECK,
+    F_STATUS, F_LAST_CHECK,
 ]
 
 CURRENT_YEAR = str(datetime.now().year)
@@ -152,14 +155,46 @@ def get_format_names():
     return _format_name_cache
 
 
+_category_slug_cache = None  # {record_id: slug}
+
+
+def get_category_slugs():
+    """Fetch Categories table once per run and return a {record_id: slug} map."""
+    global _category_slug_cache
+    if _category_slug_cache is not None:
+        return _category_slug_cache
+    try:
+        data = at_get(CATEGORIES_TABLE, {"pageSize": 100})
+        _category_slug_cache = {
+            rec["id"]: (rec.get("fields", {}).get(CATEGORY_F_SLUG) or "").strip().lower()
+            for rec in data.get("records", [])
+        }
+    except Exception as e:
+        print(f"  Warning: could not fetch Categories table: {e}", file=sys.stderr)
+        _category_slug_cache = {}
+    return _category_slug_cache
+
+
 def is_excluded(rec):
     """
     Returns True if the record should be skipped:
+    - Already marked Inactive (Status field)
+    - Category is graveyard
     - New launch this year (marked 'x')
     - Type contains 'document'
     - Formats contains 'books'
     """
     f = rec.get("fields", {})
+
+    # Already marked Inactive or N/A
+    if f.get(F_STATUS) in ("Inactive", "N/A"):
+        return True
+
+    # Category is graveyard
+    category_ids = f.get(F_CATEGORIES) or []
+    category_slugs = get_category_slugs()
+    if any(category_slugs.get(cid, "") == "graveyard" for cid in category_ids):
+        return True
 
     # New launch this year
     new_launch  = (f.get(F_NEW_LAUNCH) or "").strip().lower()
