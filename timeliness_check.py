@@ -22,6 +22,9 @@ Social recency is checked (most recent post date) for:
     YouTube (needs YOUTUBE_API_KEY), Bluesky, Medium, Reddit, Substack,
     Mastodon / fediverse (any /@username URL on a non-major-platform domain).
     Twitter/X, LinkedIn, Facebook, Instagram: URL-alive only (no post date).
+
+Social links are sourced from the Airtable Links table and also auto-discovered
+by scraping the project's homepage for known social media domains.
 """
 
 import os
@@ -281,6 +284,13 @@ _ARTICLE_DOMAINS = {
 
 # Domains and patterns we should skip entirely (no useful signal)
 _SKIP_DOMAINS = {"bing.com", "google.com"}
+
+# Social media domains to look for when scanning a homepage for social links
+_SOCIAL_DOMAINS = {
+    "twitter.com", "x.com", "linkedin.com", "facebook.com", "instagram.com",
+    "youtube.com", "youtu.be", "bsky.app", "medium.com", "reddit.com",
+    "substack.com", "tiktok.com",
+}
 
 
 def resolve_duckduckgo(url):
@@ -575,7 +585,47 @@ def discover_feed_url(website_url):
         except Exception:
             continue
 
+    # Step 3: feedparser fallback for /feed and /rss — handles platforms like
+    # Substack where the page is JS-rendered (no autodiscovery link) and the
+    # feed endpoint may not return an XML content-type header.
+    if HAS_FEEDPARSER:
+        for path in ("/feed", "/rss"):
+            try:
+                url = base + path
+                r   = SESSION.get(url, timeout=8, allow_redirects=True)
+                if r.status_code == 200:
+                    feed = feedparser.parse(r.content)
+                    if feed.entries:
+                        return url
+            except Exception:
+                continue
+
     return None
+
+
+def discover_social_links(website_url):
+    """
+    Fetch website homepage and extract social media profile links.
+    Returns a list of URL strings, one per domain (de-duplicated).
+    """
+    if not website_url:
+        return []
+    try:
+        r = SESSION.get(website_url, timeout=10)
+        if r.status_code != 200:
+            return []
+        parser = _LinkExtractor()
+        parser.feed(r.text)
+        found = {}
+        for href, _ in parser.links:
+            if not href.startswith("http"):
+                continue
+            netloc = urlparse(href).netloc.lower().lstrip("www.")
+            if netloc in _SOCIAL_DOMAINS and netloc not in found:
+                found[netloc] = href
+        return list(found.values())
+    except Exception:
+        return []
 
 
 def fetch_links_for_record(linked_ids):
@@ -889,11 +939,26 @@ def compute_liveliness(rec):
             blog_date = d
     print(f"    blog     → latest post: {blog_date}")
 
-    # ── Social links: recency + accessibility (from Links table only) ───────────
+    # ── Social links: recency + accessibility ────────────────────────────────
     linked_ids = [r if isinstance(r, str) else r.get("id") for r in (fields.get(F_LINKS) or [])]
     link_items = fetch_links_for_record(linked_ids) if linked_ids else []
     all_social_urls = [item["url"] for item in link_items]
     print(f"    links    → {len(link_items)} records fetched")
+
+    # Auto-discover social links from the website homepage
+    if website_url and url_class == "homepage":
+        discovered_social = discover_social_links(website_url)
+        if discovered_social:
+            existing_domains = {urlparse(u).netloc.lower().lstrip("www.") for u in all_social_urls}
+            added = []
+            for su in discovered_social:
+                domain = urlparse(su).netloc.lower().lstrip("www.")
+                if domain not in existing_domains:
+                    all_social_urls.append(su)
+                    existing_domains.add(domain)
+                    added.append(su)
+            if added:
+                print(f"    links    → auto-discovered {len(added)} social link(s) from homepage")
 
     accessible_count  = 0
     social_dated      = []  # list of (datetime, platform_label)
@@ -907,7 +972,7 @@ def compute_liveliness(rec):
             social_dated.append((dt, platform))
             print(f"    social   → {platform}: last post {dt.date()}")
 
-    accessible_count = min(accessible_count, 5)  # cap alive bonus
+    accessible_count = min(accessible_count, 3)  # cap alive bonus at 3 links
 
     # ── Combine all signals ───────────────────────────────────────────────────
     best_score = 0
@@ -937,8 +1002,8 @@ def compute_liveliness(rec):
     elif website_alive is False:
         score = max(score - 50, 0)  # strong signal of death
 
-    # Social presence bonus: +1 per accessible link, up to +5
-    score = min(score + accessible_count * 1, 100)
+    # Social presence bonus: +10 per accessible link, up to 3 links (+30 max)
+    score = min(score + accessible_count * 10, 100)
 
     # Floor: website up but no dated signals → benefit of the doubt
     if best_date is None and website_alive is True and not is_archived:
