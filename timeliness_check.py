@@ -1006,8 +1006,6 @@ def main():
                 F_LAST_CHECK:      today,
             },
         }
-        if result["status"]:                    # only when score is definitively high or low
-            update["fields"][F_STATUS] = result["status"]
         if result["last_activity_date"]:
             update["fields"][F_LAST_ACTIVITY] = result["last_activity_date"]
         update["_discovered_url"] = result.get("discovered_url")  # stored locally, not sent to Airtable
