@@ -480,6 +480,30 @@ def check_website(url):
     return _try_fetch(url)[0], False
 
 
+def find_wayback_url(url):
+    """
+    Query the Wayback Machine Availability API for the most recent snapshot
+    of a URL. Returns the archive URL string if a status-200 snapshot exists,
+    otherwise None.
+    """
+    if not url:
+        return None
+    try:
+        r = requests.get(
+            "https://archive.org/wayback/available",
+            params={"url": url},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        closest = r.json().get("archived_snapshots", {}).get("closest", {})
+        if closest.get("available") and closest.get("status") == "200":
+            return closest["url"]
+    except Exception:
+        pass
+    return None
+
+
 def check_github(url):
     """
     Returns pushed_at as a timezone-aware datetime, or None.
@@ -920,6 +944,17 @@ def compute_liveliness(rec):
         website_alive, is_archived = check_website(raw_url)
         print(f"    website  → alive={website_alive}  archived={is_archived}")
 
+    # ── Wayback Machine fallback for dead sites ───────────────────────────────
+    archive_url = None
+    if website_alive is False and not is_archived and website_url:
+        print(f"    website  → dead, checking Wayback Machine…")
+        archive_url = find_wayback_url(website_url)
+        if archive_url:
+            print(f"    website  → archive found: {archive_url}")
+            is_archived = True  # treat as archived for scoring
+        else:
+            print(f"    website  → no archive found")
+
     # ── GitHub ───────────────────────────────────────────────────────────────
     github_date = check_github(fields.get(F_GITHUB))
     print(f"    github   → last push: {github_date}")
@@ -1020,6 +1055,8 @@ def compute_liveliness(rec):
     print(f"    → score={score}  activity={activity_status}  status={status or '(no change)'}  last_activity={last_activity_str}")
     if discovered_url:
         print(f"    → discovered homepage: {discovered_url}  (original was article URL)")
+    if archive_url:
+        print(f"    → replacing Website URL with archive: {archive_url}")
 
     return {
         "score":              score,
@@ -1027,6 +1064,7 @@ def compute_liveliness(rec):
         "activity_status":    activity_status,
         "status":             status,
         "discovered_url":     discovered_url,
+        "archive_url":        archive_url,
     }
 
 
@@ -1073,7 +1111,10 @@ def main():
         }
         if result["last_activity_date"]:
             update["fields"][F_LAST_ACTIVITY] = result["last_activity_date"]
+        if result.get("archive_url"):
+            update["fields"][F_WEBSITE] = result["archive_url"]
         update["_discovered_url"] = result.get("discovered_url")  # stored locally, not sent to Airtable
+        update["_archive_url"]    = result.get("archive_url")     # stored locally for summary display
         updates.append(update)
         time.sleep(0.5)
 
@@ -1089,15 +1130,21 @@ def main():
     print(f"{'Record ID':<20} {'Score':>7}  {'Activity status':<20}  {'Status':<10}  Last activity")
     print("-" * 80)
     for u in updates:
-        f    = u["fields"]
-        disc = u.get("_discovered_url") or ""
+        f       = u["fields"]
+        disc    = u.get("_discovered_url") or ""
+        archive = u.get("_archive_url") or ""
+        suffix  = ""
+        if disc:
+            suffix = f"  → homepage: {disc}"
+        elif archive:
+            suffix = f"  → archived: {archive}"
         print(
             f"{u['id']:<20} "
             f"{str(f[F_LIVELINESS]):>7}  "
             f"{f.get(F_ACTIVITY_STATUS, ''):<20}  "
             f"{f.get(F_STATUS, '(no change)'):<10}  "
             f"{f.get(F_LAST_ACTIVITY, 'n/a')}"
-            + (f"  → {disc}" if disc else "")
+            + suffix
         )
 
 
