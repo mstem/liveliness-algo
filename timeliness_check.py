@@ -226,18 +226,20 @@ def is_excluded(rec):
 def fetch_batch():
     """
     Return the next BATCH_SIZE records to check.
-    Priority: never-checked first (empty Last timeliness check),
-              then oldest-checked first.
+    Priority: never-checked first (empty Last timeliness check), oldest-created first
+              within that pool; then oldest-checked first.
     Excludes new launches from the current year.
     """
     collected = []
 
-    # Pass 1: never checked
+    # Pass 1: never checked — fetch a large pool and process oldest-created first
+    # (newer additions are more likely already active and less urgent to check)
     data = at_get(LISTINGS_TABLE, {
         "filterByFormula": f'{{{_field_name(F_LAST_CHECK)}}} = ""',
-        "pageSize": BATCH_SIZE * 4,
+        "pageSize": 100,
     })
-    collected.extend(data.get("records", []))
+    never_checked = sorted(data.get("records", []), key=lambda r: r.get("createdTime", ""))
+    collected.extend(never_checked)
 
     # Pass 2: oldest checked (if we still need records)
     if len(collected) < BATCH_SIZE * 2:
@@ -253,9 +255,35 @@ def fetch_batch():
     return eligible[:BATCH_SIZE]
 
 
+def is_na_candidate(rec):
+    """Returns True if record should be marked N/A (books format or document type)."""
+    f = rec.get("fields", {})
+    type_values = f.get(F_TYPE) or []
+    if any("document" in str(t).lower() for t in type_values):
+        return True
+    format_ids = f.get(F_FORMATS) or []
+    format_names = get_format_names()
+    if any(format_names.get(fid, "") == "books" for fid in format_ids):
+        return True
+    return False
+
+
+def fetch_na_candidates():
+    """Return records with books format or document type that aren't yet marked N/A."""
+    data = at_get(LISTINGS_TABLE, {
+        "filterByFormula": (
+            f'NOT(OR({{{_field_name(F_STATUS)}}} = "N/A",'
+            f'       {{{_field_name(F_STATUS)}}} = "Inactive"))'
+        ),
+        "pageSize": 100,
+    })
+    return [r for r in data.get("records", []) if is_na_candidate(r)]
+
+
 # Field name cache (Airtable formula filters use field names, not IDs)
 _FIELD_NAME_MAP = {
     F_LAST_CHECK: "Last timeliness check",
+    F_STATUS:     "Status",
 }
 
 def _field_name(fid):
@@ -1084,6 +1112,15 @@ def main():
     parser.add_argument("--records", nargs="+", metavar="recXXX",
                         help="Specific record IDs to check (skips normal batch queue)")
     args = parser.parse_args()
+
+    # Mark books/document listings as N/A before the normal timeliness check
+    na_records = fetch_na_candidates()
+    if na_records:
+        print(f"Marking {len(na_records)} books/document record(s) as N/A...")
+        na_updates = [{"id": r["id"], "fields": {F_STATUS: "N/A"}} for r in na_records]
+        for i in range(0, len(na_updates), 10):
+            at_patch(LISTINGS_TABLE, na_updates[i : i + 10])
+        print(f"  Done.\n")
 
     if args.records:
         print(f"Fetching {len(args.records)} specified records...")
