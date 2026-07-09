@@ -5,6 +5,9 @@ on:
     - cron: '0 9 * * *'  # every day at 09:00 UTC
   workflow_dispatch:         # also allows manual trigger from GitHub UI
 
+permissions:
+  contents: read
+
 concurrency:
   group: timeliness-check
   cancel-in-progress: false  # wait for current run to finish, don't overlap
@@ -15,9 +18,11 @@ jobs:
     timeout-minutes: 8       # kill if a run stalls (shouldn't exceed ~5 min for 10 projects)
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
           cache: pip
@@ -28,6 +33,6 @@ jobs:
       - name: Run timeliness check
         env:
           AIRTABLE_PAT:    ${{ secrets.AIRTABLE_PAT }}
-          GITHUB_TOKEN:    ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN:    ${{ secrets.GITHUB_TOKEN }}  # built-in ephemeral token; read-only per permissions block
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: python timeliness_check.py

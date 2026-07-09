@@ -1,2 +1,7 @@
-requests
-feedparser
+certifi==2026.6.17
+charset-normalizer==3.4.9
+feedparser==6.0.12
+idna==3.18
+requests==2.34.2
+sgmllib3k==1.0.0
+urllib3==2.7.0

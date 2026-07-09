@@ -30,6 +30,7 @@ by scraping the project's homepage for known social media domains.
 import os
 import sys
 import re
+import signal
 import time
 import json
 from datetime import datetime, timezone
@@ -295,6 +296,45 @@ def _field_name(fid):
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "civictech.guide timeliness-checker/1.0 (+https://civictech.guide)"})
 
+# Project URLs come from public submissions — cap how much of any body we
+# download so one hostile/broken site can't hang or OOM the run.
+MAX_FETCH_BYTES  = 1_000_000
+FETCH_DEADLINE_S = 20
+
+
+class _LimitedResponse:
+    """Snapshot of a response with the body capped at MAX_FETCH_BYTES."""
+
+    def __init__(self, r, body):
+        self.status_code = r.status_code
+        self.headers     = r.headers
+        self.url         = r.url
+        self.content     = body
+        self._encoding   = r.encoding or "utf-8"
+
+    @property
+    def text(self):
+        return self.content.decode(self._encoding, errors="replace")
+
+
+def get_limited(url, timeout=10, headers=None):
+    """GET that stops reading at MAX_FETCH_BYTES or FETCH_DEADLINE_S of
+    wall-clock time, whichever comes first. Raises like requests.get.
+    A server dripping bytes too slowly to ever fill a chunk can still hold
+    the read open — the per-record SIGALRM budget is the backstop there."""
+    r = SESSION.get(url, timeout=timeout, allow_redirects=True, stream=True,
+                    headers=headers)
+    start, size, chunks = time.monotonic(), 0, []
+    try:
+        for chunk in r.iter_content(chunk_size=8192):
+            chunks.append(chunk)
+            size += len(chunk)
+            if size >= MAX_FETCH_BYTES or time.monotonic() - start > FETCH_DEADLINE_S:
+                break
+    finally:
+        r.close()
+    return _LimitedResponse(r, b"".join(chunks))
+
 
 # ── URL classification ────────────────────────────────────────────────────────
 
@@ -327,7 +367,7 @@ def resolve_duckduckgo(url):
     Returns the resolved URL, or None if resolution failed or stayed on DuckDuckGo.
     """
     try:
-        r = SESSION.get(url, timeout=10, allow_redirects=True)
+        r = get_limited(url)
         final = r.url
         if "duckduckgo.com" not in final:
             return final
@@ -396,7 +436,7 @@ def find_homepage_in_article(article_url):
     project's actual homepage. Returns a URL string or None.
     """
     try:
-        r = SESSION.get(article_url, timeout=12, allow_redirects=True)
+        r = get_limited(article_url, timeout=12)
         if r.status_code != 200:
             return None
 
@@ -612,7 +652,7 @@ def discover_feed_url(website_url):
 
     # Step 1: autodiscovery link tag in homepage HTML
     try:
-        r = SESSION.get(website_url, timeout=10)
+        r = get_limited(website_url)
         if r.status_code == 200:
             # Match <link ... type="application/rss+xml" ... href="..."> in either attribute order
             for pattern in (
@@ -630,7 +670,7 @@ def discover_feed_url(website_url):
     for path in ("/feed", "/rss", "/feed.xml", "/atom.xml", "/rss.xml", "/blog/feed"):
         try:
             url = base + path
-            r   = SESSION.get(url, timeout=8, allow_redirects=True)
+            r   = get_limited(url, timeout=8)
             ct  = r.headers.get("content-type", "")
             if r.status_code == 200 and any(s in ct for s in ("xml", "rss", "atom")):
                 return url
@@ -644,7 +684,7 @@ def discover_feed_url(website_url):
         for path in ("/feed", "/rss"):
             try:
                 url = base + path
-                r   = SESSION.get(url, timeout=8, allow_redirects=True)
+                r   = get_limited(url, timeout=8)
                 if r.status_code == 200:
                     feed = feedparser.parse(r.content)
                     if feed.entries:
@@ -663,7 +703,7 @@ def discover_social_links(website_url):
     if not website_url:
         return []
     try:
-        r = SESSION.get(website_url, timeout=10)
+        r = get_limited(website_url)
         if r.status_code != 200:
             return []
         parser = _LinkExtractor()
@@ -707,10 +747,8 @@ def _parse_feed_latest(url, extra_headers=None):
     if not HAS_FEEDPARSER:
         return None
     try:
-        headers = {"User-Agent": "civictech.guide timeliness-checker/1.0"}
-        if extra_headers:
-            headers.update(extra_headers)
-        r = requests.get(url, headers=headers, timeout=10)
+        headers = dict(extra_headers) if extra_headers else None
+        r = get_limited(url, headers=headers)
         if r.status_code != 200:
             return None
         feed   = feedparser.parse(r.content)
@@ -1098,6 +1136,18 @@ def compute_liveliness(rec):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+# Hard wall-clock cap per record: even with capped downloads, a record with
+# many slow URLs could otherwise eat the whole CI job.
+RECORD_TIME_BUDGET_S = 120
+
+
+class RecordTimeout(Exception):
+    pass
+
+
+def _record_timeout_handler(signum, frame):
+    raise RecordTimeout()
+
 def fetch_by_ids(record_ids):
     """Fetch specific records by ID (for targeted test runs)."""
     data = at_get(LISTINGS_TABLE, {
@@ -1136,34 +1186,40 @@ def main():
     today   = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     updates = []
 
+    signal.signal(signal.SIGALRM, _record_timeout_handler)
+
     for rec in records:
-        result = compute_liveliness(rec)
-        update = {
-            "id": rec["id"],
-            "fields": {
-                F_LIVELINESS:      result["score"],
-                F_ACTIVITY_STATUS: result["activity_status"],
-                F_LAST_CHECK:      today,
-            },
-        }
-        if result["last_activity_date"]:
-            update["fields"][F_LAST_ACTIVITY] = result["last_activity_date"]
-        if result.get("archive_url"):
-            update["fields"][F_WEBSITE] = result["archive_url"]
-        update["_discovered_url"] = result.get("discovered_url")  # stored locally, not sent to Airtable
-        update["_archive_url"]    = result.get("archive_url")     # stored locally for summary display
+        signal.alarm(RECORD_TIME_BUDGET_S)
+        try:
+            result = compute_liveliness(rec)
+        except RecordTimeout:
+            name = rec.get("fields", {}).get(F_NAME, rec["id"])
+            print(f"\n  [{name}] ✗ exceeded {RECORD_TIME_BUDGET_S}s budget — marking checked without a score")
+            result = None
+        finally:
+            signal.alarm(0)
+
+        fields = {F_LAST_CHECK: today}
+        if result:
+            fields[F_LIVELINESS]      = result["score"]
+            fields[F_ACTIVITY_STATUS] = result["activity_status"]
+            if result["last_activity_date"]:
+                fields[F_LAST_ACTIVITY] = result["last_activity_date"]
+            if result.get("archive_url"):
+                fields[F_WEBSITE] = result["archive_url"]
+
+        # Write each record as soon as it's done: a stalled or killed run keeps
+        # its progress, and Last timeliness check always advances the queue
+        # past a record that hangs.
+        at_patch(LISTINGS_TABLE, [{"id": rec["id"], "fields": fields}])
+
+        update = {"id": rec["id"], "fields": fields}
+        update["_discovered_url"] = (result or {}).get("discovered_url")  # stored locally, not sent to Airtable
+        update["_archive_url"]    = (result or {}).get("archive_url")     # stored locally for summary display
         updates.append(update)
         time.sleep(0.5)
 
-    print(f"\nWriting {len(updates)} results to Airtable...")
-    for i in range(0, len(updates), 10):
-        # Strip local-only keys before sending to Airtable
-        chunk = [{"id": u["id"], "fields": u["fields"]} for u in updates[i : i + 10]]
-        at_patch(LISTINGS_TABLE, chunk)
-        print(f"  Updated records {i+1}–{i+len(chunk)}")
-        time.sleep(0.2)
-
-    print("\n✓ Done.\n")
+    print(f"\n✓ Done — {len(updates)} record(s) written.\n")
     print(f"{'Record ID':<20} {'Score':>7}  {'Activity status':<20}  {'Status':<10}  Last activity")
     print("-" * 80)
     for u in updates:
@@ -1177,7 +1233,7 @@ def main():
             suffix = f"  → archived: {archive}"
         print(
             f"{u['id']:<20} "
-            f"{str(f[F_LIVELINESS]):>7}  "
+            f"{str(f.get(F_LIVELINESS, 'n/a')):>7}  "
             f"{f.get(F_ACTIVITY_STATUS, ''):<20}  "
             f"{f.get(F_STATUS, '(no change)'):<10}  "
             f"{f.get(F_LAST_ACTIVITY, 'n/a')}"
